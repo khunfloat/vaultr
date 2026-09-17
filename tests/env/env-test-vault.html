@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vault folder test</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; color: #111; }
+  h1 { font-size: 20px; }
+  .row { border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
+  .row b { display: inline-block; min-width: 64px; }
+  .ok { color: #15803d; } .fail { color: #b91c1c; } .wait { color: #a16207; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid #d4d4d4; background: #fff; cursor: pointer; margin: 4px 6px 0 0; }
+  button:hover { background: #f5f5f5; }
+  code { background: #f4f4f5; padding: 1px 4px; border-radius: 4px; }
+  pre { background: #f4f4f5; padding: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 12px; max-height: 240px; overflow: auto; }
+</style>
+</head>
+<body>
+<h1>Vault folder test</h1>
+<p>Create an empty folder first, e.g. <code>Documents\TodoVault</code>. Run steps in order.</p>
+
+<div class="row"><b id="s1" class="wait">…</b> 1. Pick folder (showDirectoryPicker)
+  <div id="d1"></div>
+  <button onclick="pick()">Pick vault folder</button></div>
+
+<div class="row"><b id="s2" class="wait">…</b> 2. Create subfolders + write/read/rename/delete .md
+  <div id="d2"></div>
+  <button onclick="crud()">Run</button></div>
+
+<div class="row"><b id="s3" class="wait">…</b> 3. Write binary (image attachment)
+  <div id="d3"></div>
+  <button onclick="binary()">Run</button></div>
+
+<div class="row"><b id="s4" class="wait">…</b> 4. Performance: write + scan 500 notes
+  <div id="d4"></div>
+  <button onclick="perf()">Run</button>
+  <button onclick="cleanupPerf()">Delete perf files</button></div>
+
+<div class="row"><b id="s5" class="wait">…</b> 5. Reuse folder handle after log off / restart
+  <div id="d5">Log off, reopen this file, click the button. Browser asks permission once.</div>
+  <button onclick="reuse()">Reopen saved vault</button></div>
+
+<div class="row"><b id="s6" class="wait">…</b> 6. Detect external change (edit a file in Notepad)
+  <div id="d6">After step 2, open <code>notes\hello.md</code> in Notepad, change text, save, then click.</div>
+  <button onclick="detect()">Check change</button></div>
+
+<h2 style="font-size:16px">Log</h2>
+<pre id="log"></pre>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const log = (m) => { $('log').textContent += m + '\n'; };
+  const set = (id, state, msg) => {
+    const s = $('s' + id);
+    s.className = state; s.textContent = { ok: 'PASS', fail: 'FAIL', wait: 'WAIT' }[state];
+    if (msg !== undefined) $('d' + id).innerHTML = msg;
+  };
+  let vault = null;
+
+  // tiny IDB kv for the handle
+  const idb = () => new Promise((res, rej) => {
+    const r = indexedDB.open('env-test-vault', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  const kv = async (mode, fn) => {
+    const db = await idb();
+    return new Promise((res, rej) => {
+      const t = db.transaction('kv', mode); const req = fn(t.objectStore('kv'));
+      t.oncomplete = () => res(req.result); t.onerror = () => rej(t.error);
+    });
+  };
+
+  async function need() {
+    if (!vault) throw new Error('Pick or reopen vault first (step 1 or 5)');
+    if (await vault.queryPermission({ mode: 'readwrite' }) !== 'granted') {
+      if (await vault.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('permission denied');
+    }
+    return vault;
+  }
+  async function writeText(dir, name, text) {
+    const f = await dir.getFileHandle(name, { create: true });
+    const w = await f.createWritable(); await w.write(text); await w.close(); return f;
+  }
+  async function readText(dir, name) {
+    return (await (await dir.getFileHandle(name)).getFile()).text();
+  }
+
+  if (!('showDirectoryPicker' in window)) set('1', 'fail', 'showDirectoryPicker not available');
+
+  async function pick() {
+    try {
+      vault = await showDirectoryPicker({ id: 'vault', mode: 'readwrite' });
+      await kv('readwrite', (s) => s.put(vault, 'vault'));
+      set('1', 'ok', `Picked <code>${vault.name}</code>, handle saved.`);
+    } catch (e) { set('1', 'fail', 'Error: <code>' + e + '</code>'); }
+  }
+
+  async function crud() {
+    try {
+      const v = await need();
+      const notes = await v.getDirectoryHandle('notes', { create: true });
+      const tickets = await v.getDirectoryHandle('tickets', { create: true });
+      const att = await v.getDirectoryHandle('attachments', { create: true });
+      await writeText(notes, 'hello.md', '# Hello\n\nLink to [[TD-1]]. ภาษาไทยทดสอบ\n');
+      await writeText(tickets, 'TD-1.md', '---\nstatus: todo\ndeadline: 2026-10-01\n---\n# First ticket\n');
+      const back = await readText(notes, 'hello.md');
+      if (!back.includes('ภาษาไทย')) throw new Error('UTF-8 roundtrip failed');
+      // rename = copy + delete (move() may not exist)
+      const tmp = await writeText(notes, 'rename-me.md', 'x');
+      let renameVia = 'copy+delete';
+      if (typeof tmp.move === 'function') { await tmp.move('renamed.md'); renameVia = 'handle.move()'; }
+      else { await writeText(notes, 'renamed.md', 'x'); await notes.removeEntry('rename-me.md'); }
+      await notes.removeEntry('renamed.md');
+      const f = await (await notes.getFileHandle('hello.md')).getFile();
+      localStorage.setItem('vault-test-mtime', String(f.lastModified));
+      log('crud ok, rename via ' + renameVia);
+      set('2', 'ok', `Created <code>notes/ tickets/ attachments/</code>, UTF-8 OK, rename via <code>${renameVia}</code>, delete OK.`);
+    } catch (e) { set('2', 'fail', 'Error: <code>' + e + '</code>'); }
+  }
+
+  async function binary() {
+    try {
+      const v = await need();
+      const att = await v.getDirectoryHandle('attachments', { create: true });
+      const c = document.createElement('canvas'); c.width = 200; c.height = 80;
+      const g = c.getContext('2d'); g.fillStyle = '#2563eb'; g.fillRect(0, 0, 200, 80);
+      g.fillStyle = '#fff'; g.font = '20px sans-serif'; g.fillText('attachment', 40, 48);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+      const fh = await att.getFileHandle('test.png', { create: true });
+      const w = await fh.createWritable(); await w.write(blob); await w.close();
+      const url = URL.createObjectURL(await fh.getFile());
+      set('3', 'ok', `Wrote <code>attachments/test.png</code> (${blob.size} bytes) and read back:<br><img src="${url}" width="200">`);
+    } catch (e) { set('3', 'fail', 'Error: <code>' + e + '</code>'); }
+  }
+
+  async function perf() {
+    try {
+      const v = await need();
+      const dir = await v.getDirectoryHandle('perf-test', { create: true });
+      const body = '# Note\n\n' + 'Lorem ipsum dolor sit amet [[link]] #tag\n'.repeat(40);
+      set('4', 'wait', 'Writing 500 files…');
+      let t = performance.now();
+      for (let i = 0; i < 500; i++) await writeText(dir, `note-${i}.md`, body);
+      const writeMs = performance.now() - t;
+      t = performance.now();
+      let n = 0, bytes = 0;
+      for await (const [name, h] of dir.entries()) {
+        if (h.kind === 'file') { const txt = await (await h.getFile()).text(); n++; bytes += txt.length; }
+      }
+      const scanMs = performance.now() - t;
+      set('4', scanMs < 3000 ? 'ok' : 'wait',
+        `write 500: ${writeMs.toFixed(0)} ms · full scan+read ${n} files (${(bytes / 1e3).toFixed(0)} KB): ${scanMs.toFixed(0)} ms`);
+    } catch (e) { set('4', 'fail', 'Error: <code>' + e + '</code>'); }
+  }
+  async function cleanupPerf() {
+    try { const v = await need(); await v.removeEntry('perf-test', { recursive: true }); log('perf-test deleted'); }
+    catch (e) { log('cleanup error: ' + e); }
+  }
+
+  async function reuse() {
+    try {
+      vault = await kv('readonly', (s) => s.get('vault'));
+      if (!vault) return set('5', 'fail', 'No saved handle. Run step 1 first.');
+      const before = await vault.queryPermission({ mode: 'readwrite' });
+      await need();
+      const names = [];
+      for await (const [name] of vault.entries()) names.push(name);
+      set('5', 'ok', `Reopened <code>${vault.name}</code> (permission before click: ${before}). Contains: ${names.join(', ') || '(empty)'}`);
+    } catch (e) { set('5', 'fail', 'Error: <code>' + e + '</code>'); }
+  }
+
+  async function detect() {
+    try {
+      const v = await need();
+      const notes = await v.getDirectoryHandle('notes');
+      const f = await (await notes.getFileHandle('hello.md')).getFile();
+      const prev = Number(localStorage.getItem('vault-test-mtime') || 0);
+      const changed = f.lastModified !== prev;
+      set('6', changed ? 'ok' : 'wait',
+        (changed ? 'Change detected via lastModified.' : 'No change yet — edit & save in Notepad, then click again.') +
+        `<pre>${(await f.text()).replace(/</g, '&lt;')}</pre>`);
+      if ('FileSystemObserver' in window) log('FileSystemObserver available (live watch possible)');
+      else log('FileSystemObserver not available (will poll lastModified)');
+    } catch (e) { set('6', 'fail', 'Error: <code>' + e + '</code>'); }
+  }
+
+  log('userAgent: ' + navigator.userAgent);
+  log('FileSystemObserver: ' + ('FileSystemObserver' in window));
+</script>
+</body>
+</html>

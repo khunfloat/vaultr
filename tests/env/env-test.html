@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Todo env test</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #111; }
+  h1 { font-size: 20px; }
+  .row { border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
+  .row b { display: inline-block; min-width: 64px; }
+  .ok { color: #15803d; } .fail { color: #b91c1c; } .wait { color: #a16207; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid #d4d4d4; background: #fff; cursor: pointer; margin-right: 6px; }
+  button:hover { background: #f5f5f5; }
+  code { background: #f4f4f5; padding: 1px 4px; border-radius: 4px; }
+  pre { background: #f4f4f5; padding: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Todo app — environment test</h1>
+<p>Open this file by double-clicking it (URL should start with <code>file:///</code>).</p>
+
+<div class="row"><b id="s1" class="fail">FAIL</b> 1. JavaScript runs on file://
+  <div id="d1">JS did not run — blocked by policy.</div></div>
+
+<div class="row"><b id="s1b" class="wait">…</b> 1b. Inline ES module runs
+  <div id="d1b"></div></div>
+
+<div class="row"><b id="s2" class="wait">…</b> 2. IndexedDB persists across browser restart
+  <div id="d2"></div>
+  <div style="margin-top:8px"><button onclick="idbReset()">Reset counter</button></div></div>
+
+<div class="row"><b id="s2b" class="wait">…</b> 2b. navigator.storage.persist()
+  <div id="d2b"></div></div>
+
+<div class="row"><b id="s3" class="wait">…</b> 3. File System Access API (showSaveFilePicker)
+  <div id="d3"></div>
+  <div style="margin-top:8px">
+    <button onclick="fsSave()">Pick file &amp; write</button>
+    <button onclick="fsReuse()">Rewrite saved handle</button>
+  </div></div>
+
+<h2 style="font-size:16px">Environment</h2>
+<pre id="env"></pre>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const set = (id, state, msg) => {
+    const s = $('s' + id);
+    s.className = state; s.textContent = { ok: 'PASS', fail: 'FAIL', wait: 'WAIT' }[state];
+    if (msg !== undefined) $('d' + id).innerHTML = msg;
+  };
+
+  // 1. JS
+  set('1', location.protocol === 'file:' ? 'ok' : 'wait',
+    'JS runs. Protocol: <code>' + location.protocol + '</code>' +
+    (location.protocol === 'file:' ? '' : ' (not file:// — open the file directly)'));
+
+  $('env').textContent = [
+    'userAgent: ' + navigator.userAgent,
+    'url: ' + location.href,
+    'isSecureContext: ' + window.isSecureContext,
+    'origin: ' + location.origin,
+  ].join('\n');
+
+  // 2. IndexedDB
+  function openDb() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('env-test', 1);
+      r.onupgradeneeded = () => { r.result.createObjectStore('kv'); };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  }
+  function tx(db, mode, fn) {
+    return new Promise((res, rej) => {
+      const t = db.transaction('kv', mode); const store = t.objectStore('kv');
+      const out = fn(store);
+      t.oncomplete = () => res(out && out.result);
+      t.onerror = () => rej(t.error);
+    });
+  }
+  async function idbRun() {
+    try {
+      const db = await openDb();
+      const prev = await tx(db, 'readonly', (s) => s.get('visit'));
+      const next = { count: (prev?.count || 0) + 1, first: prev?.first || new Date().toISOString(), last: new Date().toISOString() };
+      await tx(db, 'readwrite', (s) => s.put(next, 'visit'));
+      if (next.count === 1) {
+        set('2', 'wait', 'Wrote visit #1. <b>Close ALL browser windows</b>, reopen this file. Counter should be 2+.');
+      } else {
+        set('2', 'ok', `Visit #${next.count}. First: ${next.first}. Data survived reload/restart.`);
+      }
+    } catch (e) {
+      set('2', 'fail', 'IndexedDB error: <code>' + e + '</code>');
+    }
+  }
+  async function idbReset() {
+    const db = await openDb(); await tx(db, 'readwrite', (s) => s.clear()); location.reload();
+  }
+  idbRun();
+
+  // 2b. persist
+  (async () => {
+    if (!navigator.storage?.persist) return set('2b', 'fail', 'API not available (not fatal — rely on file backup).');
+    try {
+      const already = await navigator.storage.persisted();
+      const granted = already || await navigator.storage.persist();
+      const est = await navigator.storage.estimate();
+      set('2b', granted ? 'ok' : 'wait',
+        `persisted: ${granted}. quota ≈ ${(est.quota / 1e6).toFixed(0)} MB` + (granted ? '' : ' (not fatal)'));
+    } catch (e) { set('2b', 'fail', 'Error: <code>' + e + '</code> (not fatal)'); }
+  })();
+
+  // 3. File System Access
+  if (!('showSaveFilePicker' in window)) {
+    set('3', 'fail', 'showSaveFilePicker not available. Fallback: manual export via download.');
+  } else {
+    set('3', 'wait', 'API exists. Click <b>Pick file &amp; write</b> to confirm.');
+  }
+  async function writeTo(handle) {
+    const w = await handle.createWritable();
+    await w.write(JSON.stringify({ test: true, at: new Date().toISOString() }, null, 2));
+    await w.close();
+  }
+  async function fsSave() {
+    try {
+      const h = await showSaveFilePicker({ suggestedName: 'todo-backup-test.json', types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }] });
+      await writeTo(h);
+      const db = await openDb(); await tx(db, 'readwrite', (s) => s.put(h, 'handle'));
+      set('3', 'ok', `Wrote <code>${h.name}</code>. Handle saved. After restart, click <b>Rewrite saved handle</b>.`);
+    } catch (e) { set('3', 'fail', 'Error: <code>' + e + '</code>'); }
+  }
+  async function fsReuse() {
+    try {
+      const db = await openDb();
+      const h = await tx(db, 'readonly', (s) => s.get('handle'));
+      if (!h) return set('3', 'wait', 'No saved handle yet. Click <b>Pick file &amp; write</b> first.');
+      let perm = await h.queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') perm = await h.requestPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') return set('3', 'fail', 'Permission denied: ' + perm);
+      await writeTo(h);
+      set('3', 'ok', `Rewrote <code>${h.name}</code> via stored handle. Auto-backup will work.`);
+    } catch (e) { set('3', 'fail', 'Error: <code>' + e + '</code>'); }
+  }
+</script>
+
+<script type="module">
+  const el = document.getElementById('s1b');
+  el.className = 'ok'; el.textContent = 'PASS';
+  document.getElementById('d1b').textContent = 'Inline module works (needed for Vite single-file build).';
+</script>
+</body>
+</html>
