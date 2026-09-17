@@ -114,24 +114,34 @@ const done = (name) => console.log(`✓ ${name}.png`)
   await page.close()
 }
 
-// Hero banner: logo + tagline over the board screenshot.
+// Hero banner (README) and social preview (GitHub repo card, 1280×640): logo + tagline over the board screenshot.
 {
-  const page = await browser.newPage({ viewport: { width: 1600, height: 900 } })
-  const logo = await (await context.newPage()).goto(`http://localhost:${PORT}/`).then(async (r) => {
-    const html = await r.text()
-    return html.match(/<link rel="icon"[^>]*href="([^"]+)"/)[1].replace(/&amp;/g, '&')
-  })
-  await page.setContent(`<!doctype html><html><body style="margin:0;background:#0a0a0a;font-family:'Segoe UI',system-ui,sans-serif;color:#fafafa;overflow:hidden">
+  const logoPage = await context.newPage()
+  const html = await (await logoPage.goto(`http://localhost:${PORT}/`)).text()
+  await logoPage.close()
+  const logo = html.match(/<link rel="icon"[^>]*href="([^"]+)"/)[1].replace(/&amp;/g, '&')
+  const board = `data:image/png;base64,${readFileSync(`${OUT}board.png`).toString('base64')}`
+
+  const banner = ({ width, height, logoSize, title, tagline, sub, top, imageWidth, imageTop }) => `<!doctype html><html><body style="margin:0;width:${width}px;height:${height}px;background:#0a0a0a;font-family:'Segoe UI',system-ui,sans-serif;color:#fafafa;overflow:hidden;position:relative">
   <div style="position:absolute;inset:0;background:radial-gradient(ellipse at 50% -10%,rgba(96,165,250,.22),transparent 55%),radial-gradient(ellipse at 90% 110%,rgba(167,139,250,.18),transparent 50%)"></div>
-  <div style="position:relative;display:flex;flex-direction:column;align-items:center;padding-top:64px">
-    <div style="display:flex;align-items:center;gap:18px"><img src="${logo}" width="72" height="72"><span style="font-size:64px;font-weight:700;letter-spacing:-.03em">Vaultr</span></div>
-    <p style="margin:18px 0 0;font-size:24px;color:#a1a1aa">Kanban tickets and Obsidian-style notes in a single HTML file.</p>
-    <p style="margin:8px 0 0;font-size:18px;color:#71717a">No install · Works offline · Your data stays as Markdown in your own folder</p>
-    <img src="data:image/png;base64,${readFileSync(`${OUT}board.png`).toString('base64')}" style="margin-top:48px;width:1200px;border-radius:14px;border:1px solid rgba(255,255,255,.12);box-shadow:0 40px 120px rgba(0,0,0,.7)">
-  </div></body></html>`)
-  await page.waitForTimeout(500)
+  <div style="position:relative;display:flex;flex-direction:column;align-items:center;padding-top:${top}px">
+    <div style="display:flex;align-items:center;gap:${logoSize / 4}px"><img src="${logo}" width="${logoSize}" height="${logoSize}"><span style="font-size:${title}px;font-weight:700;letter-spacing:-.03em">Vaultr</span></div>
+    <p style="margin:${tagline * 0.7}px 0 0;font-size:${tagline}px;color:#a1a1aa">Kanban tickets and Obsidian-style notes in a single HTML file.</p>
+    ${sub ? `<p style="margin:8px 0 0;font-size:${sub}px;color:#71717a">No install · Works offline · Your data stays as Markdown in your own folder</p>` : ''}
+    <img src="${board}" style="margin-top:${imageTop}px;width:${imageWidth}px;border-radius:14px;border:1px solid rgba(255,255,255,.12);box-shadow:0 40px 120px rgba(0,0,0,.7)">
+  </div></body></html>`
+
+  const page = await browser.newPage({ viewport: { width: 1600, height: 900 } })
+  await page.setContent(banner({ width: 1600, height: 900, logoSize: 72, title: 64, tagline: 24, sub: 18, top: 64, imageWidth: 1200, imageTop: 48 }))
+  await page.waitForTimeout(400)
   await page.screenshot({ path: `${OUT}hero.png` })
   done('hero')
+
+  await page.setViewportSize({ width: 1280, height: 640 })
+  await page.setContent(banner({ width: 1280, height: 640, logoSize: 64, title: 56, tagline: 22, sub: 0, top: 52, imageWidth: 980, imageTop: 36 }))
+  await page.waitForTimeout(400)
+  await page.screenshot({ path: `${OUT}social-preview.png` })
+  done('social-preview')
 }
 
 await browser.close()
